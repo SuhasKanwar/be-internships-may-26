@@ -1,7 +1,8 @@
-# Scale Plan (fill this)
-- Data model/indexes:
-- Idempotency across instances:
-- Rate limiting across instances:
-- Observability (logs/metrics/alerts):
-- Failure modes (DB down / partial outages / retries):
-- 10k RPS design sketch (infra & cost ballpark):
+# Scale Plan
+
+- Data model/indexes: keep `signals(id)` as the primary key, a unique index on `idempotency_key`, and a covering read path index on `(user_id, created_at, id)`. In production this table should live in Postgres or a compatible managed relational store with partitioning by time if retention grows large.
+- Idempotency across instances: store every idempotency key in a shared durable database and create the signal with an atomic insert/upsert. Never do a separate read before insert. The current SQLite implementation uses `INSERT OR IGNORE` inside `BEGIN IMMEDIATE`; at scale this becomes `INSERT ... ON CONFLICT DO NOTHING RETURNING` or an equivalent transaction in Postgres.
+- Rate limiting across instances: use one shared atomic counter store, normally Redis with a Lua script or Redis Cell, keyed by `userId` and window. The current SQLite implementation uses one transactional row per user to make local and multi-process tests deterministic; production should move that hot path out of the relational write database.
+- Observability: emit structured logs with request id, user id, status code, latency, retry count, and DB error code. Track metrics for RPS, p50/p95/p99 latency, 429 rate, retry rate, DB lock time, idempotency conflict count, queue depth, and storage write failures. Alert on elevated 5xx, sustained retry spikes, Redis saturation, DB lock waits, and ingestion lag.
+- Failure modes: retry transient DB errors with bounded exponential backoff and jitter. Keep idempotent writes atomic so retries cannot create duplicates. Return 503 once retries are exhausted. For DB outages, buffer accepted work through a durable queue only if the product can tolerate async writes; otherwise fail fast and preserve client retry semantics through idempotency keys.
+- 10k RPS design sketch: run stateless Fastify instances behind a load balancer, with Redis for rate limits and short-lived idempotency cache, Postgres for durable signal storage, and Kafka/SQS if downstream processing is needed. Use connection pooling, prepared statements, batched async consumers for non-critical work, and partitioned tables with retention policies. Start with 6-10 app instances, a Redis primary/replica or managed cluster, and a managed Postgres tier with read replicas only for list/query expansion; scale app nodes horizontally while watching DB write IOPS and Redis CPU.

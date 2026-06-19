@@ -32,3 +32,20 @@ Build a minimal production-leaning service that can **handle load**, **rate limi
 - **Scale Plan (10k RPS):** Fill `SCALE.md` with a clear, concise approach (indexes, pooling, caching, queues, horizontal scale, idempotency store).
 
 > We will run additional **hidden concurrency/multi-instance tests** during evaluation.
+
+## Implementation
+
+- Rate limiting is backed by a transactional SQLite table keyed by `userId`, so burst and parallel requests consume from one atomic window counter.
+- Idempotency uses the database unique constraint on `idempotency_key` and an atomic insert-or-return-existing flow, avoiding check-then-insert races.
+- Transient database errors are retried with bounded exponential backoff and jitter before returning `503`.
+- The service uses Node's built-in SQLite driver when available and falls back to `better-sqlite3` on runtimes that do not provide it.
+
+## Run
+
+```bash
+npm install
+npm test
+API_KEY=change-me npm run dev
+```
+
+Use `HOST=0.0.0.0` when binding outside localhost, such as in a container or deployed environment.
