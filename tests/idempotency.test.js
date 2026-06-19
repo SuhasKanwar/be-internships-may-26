@@ -1,38 +1,70 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
-import { setTimeout as wait } from 'node:timers/promises';
-import http from 'node:http';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
+process.env.API_KEY = 'k';
+process.env.LOG_LEVEL = 'silent';
+process.env.RATE_LIMIT_PER_MIN = '5';
+process.env.DATABASE_URL = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'signals-idem-')), 'signals.db');
+
+const { buildApp } = await import('../src/server.js');
 
 test('idempotency returns same resource for same key', async () => {
-  const proc = spawn('node', ['src/server.js'], { env: { ...process.env, API_KEY: 'k', PORT: '9091' } });
-  await wait(300);
-
-  const base = 'http://localhost:9091';
+  const app = buildApp();
   const idem = 'same-key';
 
-  const a = await postJson(`${base}/v1/signals`, {
-    headers: { 'x-api-key': 'k', 'Idempotency-Key': idem },
-    body: { userId: 'u1', type: 'note', payload: 'x' }
-  });
-  const b = await postJson(`${base}/v1/signals`, {
-    headers: { 'x-api-key': 'k', 'Idempotency-Key': idem },
-    body: { userId: 'u1', type: 'note', payload: 'x' }
-  });
+  const a = await postJson(app, idem, 'x');
+  const b = await postJson(app, idem, 'x');
 
-  assert.equal(a.id, b.id);
-  assert.equal(a.idempotencyKey, b.idempotencyKey);
-  proc.kill();
+  assert.equal(a.statusCode, 200);
+  assert.equal(b.statusCode, 200);
+  assert.equal(a.body.id, b.body.id);
+  assert.equal(a.body.idempotencyKey, b.body.idempotencyKey);
+  await app.close();
 });
 
-async function postJson(url, { headers, body }){
-  return new Promise((resolve, reject) => {
-    const data = JSON.stringify(body);
-    const req = http.request(url, { method: 'POST', headers: { 'content-type': 'application/json', ...headers } }, (res) => {
-      let chunks=''; res.on('data', d => chunks+=d);
-      res.on('end', () => resolve(JSON.parse(chunks||'{}')));
-    });
-    req.on('error', reject);
-    req.write(data); req.end();
+test('idempotency is safe for parallel requests', async () => {
+  const app = buildApp();
+  const idem = 'parallel-key';
+  const responses = await Promise.all(
+    Array.from({ length: 25 }, (_, i) => postJson(app, idem, `payload-${i}`))
+  );
+
+  assert.deepEqual(new Set(responses.map((res) => res.statusCode)), new Set([200]));
+  assert.equal(new Set(responses.map((res) => res.body.id)).size, 1);
+
+  const list = await app.inject({
+    method: 'GET',
+    url: '/v1/signals?userId=u1&limit=100',
+    headers: { 'x-api-key': 'k' }
   });
+  const items = JSON.parse(list.payload).items.filter((item) => item.idempotencyKey === idem);
+
+  assert.equal(items.length, 1);
+  await app.close();
+});
+
+test('idempotent replays are not rejected by rate limit', async () => {
+  const app = buildApp();
+  const idem = 'rate-replay-key';
+  const responses = await Promise.all(
+    Array.from({ length: 20 }, (_, i) => postJson(app, idem, `replay-${i}`))
+  );
+
+  assert.deepEqual(new Set(responses.map((res) => res.statusCode)), new Set([200]));
+  assert.equal(new Set(responses.map((res) => res.body.id)).size, 1);
+  await app.close();
+});
+
+async function postJson(app, idem, payload) {
+  const res = await app.inject({
+    method: 'POST',
+    url: '/v1/signals',
+    headers: { 'x-api-key': 'k', 'idempotency-key': idem },
+    payload: { userId: 'u1', type: 'note', payload }
+  });
+
+  return { statusCode: res.statusCode, body: JSON.parse(res.payload || '{}') };
 }

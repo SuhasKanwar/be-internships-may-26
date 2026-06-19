@@ -1,36 +1,47 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
-import { setTimeout as wait } from 'node:timers/promises';
-import http from 'node:http';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
-test('rate limit: allow 5 per minute, 6th is 429', async () => {
-  const proc = spawn('node', ['src/server.js'], { env: { ...process.env, API_KEY: 'k', PORT: '9092', RATE_LIMIT_PER_MIN: '5' } });
-  await wait(300);
+process.env.API_KEY = 'k';
+process.env.LOG_LEVEL = 'silent';
+process.env.RATE_LIMIT_PER_MIN = '5';
+process.env.DATABASE_URL = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'signals-rate-')), 'signals.db');
 
-  const base = 'http://localhost:9092';
+const { buildApp } = await import('../src/server.js');
+
+test('rate limit allows 5 per minute and rejects the 6th', async () => {
+  const app = buildApp();
   const statuses = [];
-  for (let i=0;i<6;i++){
-    const code = await postStatus(`${base}/v1/signals`, {
-      headers: { 'x-api-key': 'k' },
-      body: { userId: 'u1', type: 'note', payload: String(i) }
-    });
-    statuses.push(code);
+
+  for (let i = 0; i < 6; i += 1) {
+    statuses.push(await postStatus(app, 'u1', String(i)));
   }
-  const counts = statuses.reduce((acc,c)=> (acc[c]=(acc[c]||0)+1, acc), {});
-  assert.ok(counts[200] >= 5);
-  assert.ok(counts[429] >= 1);
-  proc.kill();
+
+  assert.equal(statuses.filter((status) => status === 200).length, 5);
+  assert.equal(statuses.filter((status) => status === 429).length, 1);
+  await app.close();
 });
 
-async function postStatus(url, { headers, body }){
-  return new Promise((resolve, reject) => {
-    const data = JSON.stringify(body);
-    const req = http.request(url, { method: 'POST', headers: { 'content-type': 'application/json', ...headers } }, (res) => {
-      res.resume();
-      res.on('end', () => resolve(res.statusCode));
-    });
-    req.on('error', reject);
-    req.write(data); req.end();
+test('rate limit is safe for parallel requests', async () => {
+  const app = buildApp();
+  const statuses = await Promise.all(
+    Array.from({ length: 20 }, (_, i) => postStatus(app, 'parallel-user', String(i)))
+  );
+
+  assert.equal(statuses.filter((status) => status === 200).length, 5);
+  assert.equal(statuses.filter((status) => status === 429).length, 15);
+  await app.close();
+});
+
+async function postStatus(app, userId, payload) {
+  const res = await app.inject({
+    method: 'POST',
+    url: '/v1/signals',
+    headers: { 'x-api-key': 'k' },
+    payload: { userId, type: 'note', payload }
   });
+
+  return res.statusCode;
 }
