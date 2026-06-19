@@ -1,5 +1,5 @@
-import { insertSignal, insertSignalIdempotent, isTransientDbError, listSignals } from './db.js';
-import { checkAndConsume } from './rateLimit.js';
+import { insertSignal, isTransientDbError, listSignals } from './db.js';
+import { checkAndConsume, insertIdempotentAndConsume } from './rateLimit.js';
 
 function nowMs() {
   return Date.now();
@@ -36,6 +36,20 @@ export async function postSignal(req, reply) {
     return reply.code(400).send({ error: 'invalid_body' });
   }
 
+  if (idem) {
+    try {
+      const result = await withRetry(() => insertIdempotentAndConsume(userId, type, payload, idem, nowMs()));
+      return result.signal;
+    } catch (e) {
+      if (e.code === 'RATE_LIMITED') {
+        const { remaining, resetMs } = e.limit;
+        return reply.code(429).send({ error: 'rate_limited', remaining, resetMs });
+      }
+      req.log.error({ err: e, ctx: 'insertIdempotentAndConsume' });
+      return reply.code(503).send({ error: 'db_unavailable' });
+    }
+  }
+
   let limit;
   try {
     limit = await withRetry(() => checkAndConsume(userId, nowMs()));
@@ -49,10 +63,6 @@ export async function postSignal(req, reply) {
 
   try {
     const t = nowMs();
-    if (idem) {
-      return await withRetry(() => insertSignalIdempotent(userId, type, payload, idem, t));
-    }
-
     const info = await withRetry(() => insertSignal(userId, type, payload, null, t));
     return { id: info.lastInsertRowid, userId, type, payload: String(payload), idempotencyKey: idem, createdAt: t };
   } catch (e) {

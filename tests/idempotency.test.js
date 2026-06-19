@@ -6,7 +6,7 @@ import path from 'node:path';
 
 process.env.API_KEY = 'k';
 process.env.LOG_LEVEL = 'silent';
-process.env.RATE_LIMIT_PER_MIN = '100';
+process.env.RATE_LIMIT_PER_MIN = '5';
 process.env.DATABASE_URL = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'signals-idem-')), 'signals.db');
 
 const { buildApp } = await import('../src/server.js');
@@ -43,6 +43,18 @@ test('idempotency is safe for parallel requests', async () => {
   const items = JSON.parse(list.payload).items.filter((item) => item.idempotencyKey === idem);
 
   assert.equal(items.length, 1);
+  await app.close();
+});
+
+test('idempotent replays are not rejected by rate limit', async () => {
+  const app = buildApp();
+  const idem = 'rate-replay-key';
+  const responses = await Promise.all(
+    Array.from({ length: 20 }, (_, i) => postJson(app, idem, `replay-${i}`))
+  );
+
+  assert.deepEqual(new Set(responses.map((res) => res.statusCode)), new Set([200]));
+  assert.equal(new Set(responses.map((res) => res.body.id)).size, 1);
   await app.close();
 });
 

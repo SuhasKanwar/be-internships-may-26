@@ -87,7 +87,7 @@ const insertIdempotentTransaction = immediateTransaction((userId, type, payload,
   return getByIdemKeyStmt.get(idemKey);
 });
 
-const consumeRateLimitTransaction = immediateTransaction((userId, nowMs, rate, windowMs) => {
+function consumeRateLimitInTransaction(userId, nowMs, rate, windowMs) {
   const row = getRateLimitStmt.get(userId);
   if (!row || row.windowStart + windowMs <= nowMs) {
     insertRateLimitStmt.run(userId, nowMs);
@@ -100,6 +100,27 @@ const consumeRateLimitTransaction = immediateTransaction((userId, nowMs, rate, w
 
   incrementRateLimitStmt.run(userId);
   return { ok: true, remaining: Math.max(rate - row.count - 1, 0), resetMs: row.windowStart + windowMs };
+}
+
+const consumeRateLimitTransaction = immediateTransaction((userId, nowMs, rate, windowMs) => {
+  return consumeRateLimitInTransaction(userId, nowMs, rate, windowMs);
+});
+
+const insertIdempotentWithLimitTransaction = immediateTransaction((userId, type, payload, idemKey, nowMs, rate, windowMs) => {
+  const info = insertSignalIdemStmt.run(userId, type, String(payload), idemKey, nowMs);
+  if (info.changes === 0) {
+    return { signal: getByIdemKeyStmt.get(idemKey), limit: null };
+  }
+
+  const limit = consumeRateLimitInTransaction(userId, nowMs, rate, windowMs);
+  if (!limit.ok) {
+    const err = new Error('rate_limited');
+    err.code = 'RATE_LIMITED';
+    err.limit = limit;
+    throw err;
+  }
+
+  return { signal: getByIdemKeyStmt.get(idemKey), limit };
 });
 
 export function insertSignal(userId, type, payload, idemKey, nowMs) {
@@ -110,6 +131,11 @@ export function insertSignal(userId, type, payload, idemKey, nowMs) {
 export function insertSignalIdempotent(userId, type, payload, idemKey, nowMs) {
   maybeFail();
   return insertIdempotentTransaction(userId, type, payload, idemKey, nowMs);
+}
+
+export function insertSignalIdempotentWithLimit(userId, type, payload, idemKey, nowMs, rate, windowMs) {
+  maybeFail();
+  return insertIdempotentWithLimitTransaction(userId, type, payload, idemKey, nowMs, rate, windowMs);
 }
 
 export function getByIdemKey(idemKey) {
