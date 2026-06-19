@@ -1,5 +1,7 @@
 # Signals Challenge (Node.js + Fastify)
 
+Deployment Link: ec2-65-2-71-127.ap-south-1.compute.amazonaws.com:8080
+
 Build a minimal production-leaning service that can **handle load**, **rate limit**, and **avoid duplicates** via idempotency.
 
 ## Endpoints (to keep)
@@ -22,6 +24,7 @@ Build a minimal production-leaning service that can **handle load**, **rate limi
 ## Deliverables
 - Working service, passing tests, updated README, SCALE.md.
 - Optional deploy link.
+Deployment Link: ec2-65-2-71-127.ap-south-1.compute.amazonaws.com:8080
 ---
 
 ## Extra Production Constraints (must pass)
